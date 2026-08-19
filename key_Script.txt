@@ -1,0 +1,851 @@
+import customtkinter as ctk
+import time
+import ctypes
+from ctypes import wintypes
+import json
+import os
+import sys
+import threading
+import webbrowser
+import base64
+import tempfile
+from collections import deque
+from tkinter import filedialog, messagebox
+from pynput import keyboard
+
+# Force High DPI Awareness
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    pass
+
+# --- App Version Tracker ---
+APP_VERSION = "2.9.0"
+
+# --- Win32 Low-Level API Definitions ---
+user32 = ctypes.windll.user32
+
+# --- Global Configs & Theme Setup ---
+ctk.set_appearance_mode("Dark")
+
+COLOR_BG = ("#f3f4f6", "#0d0e12")
+COLOR_SIDEBAR = ("#e5e7eb", "#13141b")
+COLOR_CARD = ("#ffffff", "#1a1b23")
+COLOR_BORDER = ("#d1d5db", "#282936")
+COLOR_TEXT_MAIN = ("#111827", "#ffffff")
+COLOR_TEXT_MUTED = ("#4b5563", "#8f93a2")
+
+CYAN_NEON = "#00f0ff"
+GREEN_NEON = "#00ff88"
+DANGER_NEON = "#ff3366"
+
+CONFIG_FILE = "xim_macros.json"
+
+mappings = {}
+recording_state = {"type": None, "id": None}
+temp_action_keys = {}
+execution_locks = {}
+
+# --- Master Pause / Single Key Toggle System ---
+script_enabled = True
+master_toggle_key = "]"  # المفتاح الافتراضي للإيقاف
+
+# --- App UI Window Creation ---
+app = ctk.CTk()
+app.title(f"Key Script v{APP_VERSION} [Keyboard Edition] - Developed by iG_ ::: i67_i9 :::")
+app.geometry("1200x820")
+app.configure(fg_color=COLOR_BG)
+
+# --- دالة دمج وتفعيل الأيقونة تلقائياً ---
+def apply_embedded_icon(win):
+    try:
+        # البحث عن أي ملف أيقونة محلي إن وجد أولاً
+        for local_ico in ["DRA.ico", "c53daddc7c963a390cafe350c7b1e990.ico", "icon.ico"]:
+            if os.path.exists(local_ico):
+                win.iconbitmap(local_ico)
+                return
+
+        # في حال عدم وجود ملف خارجي يتم إنشاء أيقونة مدمجة تلقائياً
+        icon_data = (
+            "AAABAAEAEBAAAAEAIABoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAQAQAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAD///8A///8AP///wD///8A///8AP///wD///8A///8AP///wD///8A///8AP//"
+            "/wD///8A///8AP///wD///8A///8AP///wA="
+        )
+        temp_icon_path = os.path.join(tempfile.gettempdir(), "keyscript_icon.ico")
+        with open(temp_icon_path, "wb") as f:
+            f.write(base64.b64decode(icon_data))
+        win.iconbitmap(temp_icon_path)
+    except Exception:
+        pass
+
+apply_embedded_icon(app)
+
+FONT_FAMILY = "Segoe UI"
+FONT_TITLE = ctk.CTkFont(family=FONT_FAMILY, size=20, weight="bold")
+FONT_RIGHTS = ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold")
+FONT_SUBTITLE = ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold")
+FONT_BTN = ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold")
+FONT_NORM = ctk.CTkFont(family=FONT_FAMILY, size=12)
+FONT_NODE = ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold")
+
+# --- Hardware Virtual Key (VK) Mapping Table ---
+KEY_TO_VK = {
+    'A': 0x41, 'B': 0x42, 'C': 0x43, 'D': 0x44, 'E': 0x45, 'F': 0x46, 'G': 0x47,
+    'H': 0x48, 'I': 0x49, 'J': 0x4A, 'K': 0x4B, 'L': 0x4C, 'M': 0x4D, 'N': 0x4E,
+    'O': 0x4F, 'P': 0x50, 'Q': 0x51, 'R': 0x52, 'S': 0x53, 'T': 0x54, 'U': 0x55,
+    'V': 0x56, 'W': 0x57, 'X': 0x58, 'Y': 0x59, 'Z': 0x5A,
+    '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34, 
+    '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
+    'SPACE': 0x20, 'SHIFT': 0x10, 'CTRL': 0x11, 'ALT': 0x12,
+    'ENTER': 0x0D, 'TAB': 0x09, 'BACKSPACE': 0x08, 'ESC': 0x1B,
+    'CAPSLOCK': 0x14, 'DELETE': 0x2E, 'INSERT': 0x2D, 
+    'HOME': 0x24, 'END': 0x23, 'PAGE UP': 0x21, 'PAGE DOWN': 0x22,
+    'UP': 0x26, 'DOWN': 0x28, 'LEFT': 0x25, 'RIGHT': 0x27,
+    'F1': 0x70, 'F2': 0x71, 'F3': 0x72, 'F4': 0x73, 'F5': 0x74, 'F6': 0x75,
+    'F7': 0x76, 'F8': 0x77, 'F9': 0x78, 'F10': 0x79, 'F11': 0x7A, 'F12': 0x7B,
+    ';': 0xBA, '=': 0xBB, ',': 0xBC, '-': 0xBD, '.': 0xBE, '/': 0xBF,
+    '`': 0xC0, '[': 0xDB, '\\': 0xDC, ']': 0xDD, "'": 0xDE, '{': 0xDB, '}': 0xDD
+}
+
+VK_TO_KEY = {v: k for k, v in KEY_TO_VK.items()}
+VK_TO_KEY[0xA0] = 'SHIFT'
+VK_TO_KEY[0xA1] = 'SHIFT'
+VK_TO_KEY[0xA2] = 'CTRL'
+VK_TO_KEY[0xA3] = 'CTRL'
+VK_TO_KEY[0xA4] = 'ALT'
+VK_TO_KEY[0xA5] = 'ALT'
+
+SPECIAL_KEYS_MAP = {
+    keyboard.Key.space: "SPACE",
+    keyboard.Key.shift: "SHIFT", keyboard.Key.shift_r: "SHIFT",
+    keyboard.Key.ctrl: "CTRL", keyboard.Key.ctrl_r: "CTRL",
+    keyboard.Key.alt: "ALT", keyboard.Key.alt_r: "ALT",
+    keyboard.Key.enter: "ENTER", keyboard.Key.tab: "TAB",
+    keyboard.Key.backspace: "BACKSPACE", keyboard.Key.esc: "ESC",
+    keyboard.Key.caps_lock: "CAPSLOCK", keyboard.Key.delete: "DELETE",
+    keyboard.Key.insert: "INSERT", keyboard.Key.home: "HOME", keyboard.Key.end: "END",
+    keyboard.Key.page_up: "PAGE UP", keyboard.Key.page_down: "PAGE DOWN",
+    keyboard.Key.up: "UP", keyboard.Key.down: "DOWN", keyboard.Key.left: "LEFT", keyboard.Key.right: "RIGHT",
+    keyboard.Key.f1: "F1", keyboard.Key.f2: "F2", keyboard.Key.f3: "F3", keyboard.Key.f4: "F4",
+    keyboard.Key.f5: "F5", keyboard.Key.f6: "F6", keyboard.Key.f7: "F7", keyboard.Key.f8: "F8",
+    keyboard.Key.f9: "F9", keyboard.Key.f10: "F10", keyboard.Key.f11: "F11", keyboard.Key.f12: "F12"
+}
+
+ARABIC_TO_ENGLISH_MAP = {
+    'ض': 'Q', 'ص': 'W', 'ث': 'E', 'ق': 'R', 'ف': 'T', 'غ': 'Y', 'ع': 'U', 'ه': 'I', 'خ': 'O', 'ح': 'P', 'ج': '[', 'د': ']',
+    'ش': 'A', 'س': 'S', 'ي': 'D', 'ب': 'F', 'ل': 'G', 'ت': 'H', 'ن': 'J', 'م': 'K', 'ك': 'L', 'ط': "'",
+    'ئ': 'Z', 'ء': 'X', 'ؤ': 'C', 'ر': 'V', 'لا': 'B', 'ى': 'N', 'ة': 'M', 'و': ',', 'ز': '.', 'ظ': '/',
+    'ذ': '`', 'أ': 'H', 'إ': 'Y', 'آ': 'N', 'لإ': 'T', 'لأ': 'G', 'لآ': 'B',
+    '١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9', '٠': '0'
+}
+
+def sanitize_master_key(val):
+    if isinstance(val, list):
+        val = val[0] if val else "]"
+    if not val or str(val).upper() in ["NONE", "NULL", ""]:
+        return "]"
+    k = str(val).upper()
+    if k in KEY_TO_VK or k in SPECIAL_KEYS_MAP.values():
+        return k
+    return "]"
+
+def save_data(filepath=CONFIG_FILE):
+    save_dict = {
+        "theme": ctk.get_appearance_mode(),
+        "master_toggle_key": sanitize_master_key(master_toggle_key),
+        "macros": {}
+    }
+    for mid, data in list(mappings.items()):
+        save_dict["macros"][mid] = {
+            "trigger": data["trigger"], "mode": data["mode"], "actions": data["actions"]
+        }
+    try:
+        with open(filepath, "w", encoding="utf-8") as f: json.dump(save_dict, f, indent=4)
+    except Exception: pass
+
+def load_initial_config():
+    global master_toggle_key
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                loaded_data = json.load(f)
+                raw_master = loaded_data.get("master_toggle_key") or loaded_data.get("master_toggle_keys", "]")
+                master_toggle_key = sanitize_master_key(raw_master)
+                
+                if "macros" in loaded_data:
+                    ctk.set_appearance_mode(loaded_data.get("theme", "Dark"))
+                    raw_macros = loaded_data["macros"]
+                else:
+                    raw_macros = loaded_data
+                for k, v in list(raw_macros.items()):
+                    v["is_running"] = False
+                    mappings[k] = v
+        else:
+            master_toggle_key = "]"
+        save_data()
+    except Exception:
+        master_toggle_key = "]"
+        save_data()
+
+load_initial_config()
+
+# --- System Watchdog & Safety Protection ---
+MAX_ACTIONS_PER_SEC = 50
+MAX_LAG_TOLERANCE_SEC = 0.40
+
+action_history = deque()
+watchdog_lock = threading.Lock()
+
+_sim_lock = threading.Lock()
+_sim_depth = 0
+
+def enter_sim():
+    global _sim_depth
+    with _sim_lock:
+        _sim_depth += 1
+
+def exit_sim():
+    global _sim_depth
+    with _sim_lock:
+        _sim_depth = max(0, _sim_depth - 1)
+
+def is_simulating():
+    with _sim_lock:
+        return _sim_depth > 0
+
+CURRENT_PID = os.getpid()
+
+_is_own_window_focused_cache = False
+
+def _background_focus_tracker():
+    global _is_own_window_focused_cache
+    pid = wintypes.DWORD()
+    while True:
+        try:
+            hwnd = user32.GetForegroundWindow()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            _is_own_window_focused_cache = (pid.value == CURRENT_PID)
+        except Exception:
+            _is_own_window_focused_cache = False
+        time.sleep(0.15)
+
+threading.Thread(target=_background_focus_tracker, daemon=True).start()
+
+def parse_and_limit_delay(val_str):
+    v = val_str.strip().lower()
+    if v in ["0", "inf", "∞", "infinite"]: return 0
+    try:
+        parsed = int(v)
+        if parsed < 0: return 0
+        if parsed > 10000: return 10000
+        return parsed
+    except Exception:
+        return 100
+
+def format_delay_text(delay_ms):
+    if delay_ms <= 0: return "∞ Inf"
+    elif delay_ms >= 10000: return "10 s"
+    elif delay_ms >= 1000: return f"{delay_ms / 1000:.1f} s"
+    else: return f"{delay_ms} ms"
+
+def export_config():
+    path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON Files", "*.json")])
+    if path:
+        save_data(path)
+        messagebox.showinfo("Success", "Config saved successfully!")
+
+def import_config():
+    global master_toggle_key
+    path = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json")])
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                loaded_data = json.load(f)
+                mappings.clear()
+                raw_master = loaded_data.get("master_toggle_key") or loaded_data.get("master_toggle_keys", "]")
+                master_toggle_key = sanitize_master_key(raw_master)
+                
+                raw_macros = loaded_data.get("macros", loaded_data)
+                for k, v in raw_macros.items():
+                    v["is_running"] = False
+                    mappings[k] = v
+                save_data()
+                refresh_ui()
+                messagebox.showinfo("Success", "Config loaded successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load config: {e}")
+
+def validate_watchdog_safety():
+    now = time.time()
+    with watchdog_lock:
+        while action_history and now - action_history[0] > 1.0:
+            action_history.popleft()
+        
+        action_history.append(now)
+        if len(action_history) > MAX_ACTIONS_PER_SEC:
+            release_all_active_macros()
+            set_status_indicator("● OVERLOAD STOPPED", DANGER_NEON)
+            return False
+    return True
+
+def set_status_indicator(text, color):
+    app.after(0, lambda: status_indicator.configure(text=text, text_color=color))
+
+# --- Direct Win32 Low-Level Hardware Key Executor ---
+def execute_key_action(key_str, action_type):
+    if not key_str or not validate_watchdog_safety(): return
+
+    key_upper = key_str.strip().upper()
+    vk = KEY_TO_VK.get(key_upper)
+    if not vk: return
+
+    scan_code = user32.MapVirtualKeyW(vk, 0)
+    extended = 1 if vk in [0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E] else 0
+
+    enter_sim()
+    try:
+        if action_type == "Press":
+            user32.keybd_event(vk, scan_code, extended, 0)
+            time.sleep(0.015)
+            user32.keybd_event(vk, scan_code, extended | 2, 0)
+        elif action_type == "Hold":
+            user32.keybd_event(vk, scan_code, extended, 0)
+        elif action_type in ["Unhold", "Release"]:
+            user32.keybd_event(vk, scan_code, extended | 2, 0)
+    except Exception:
+        pass
+    finally:
+        time.sleep(0.002)
+        exit_sim()
+
+def release_all_keys_for_macro(mid):
+    m_data = mappings.get(mid)
+    if not m_data: return
+    enter_sim()
+    try:
+        for act in m_data["actions"]:
+            if not act.get("key"): continue
+            key_upper = act["key"].strip().upper()
+            vk = KEY_TO_VK.get(key_upper)
+            if vk:
+                scan_code = user32.MapVirtualKeyW(vk, 0)
+                extended = 1 if vk in [0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E] else 0
+                try:
+                    user32.keybd_event(vk, scan_code, extended | 2, 0)
+                except Exception:
+                    pass
+    finally:
+        time.sleep(0.002)
+        exit_sim()
+
+def release_all_active_macros():
+    for mid, data in list(mappings.items()):
+        data["is_running"] = False
+        release_all_keys_for_macro(mid)
+        execution_locks[mid] = False
+
+def run_sequence(mid):
+    m_data = mappings.get(mid)
+    if not m_data: return
+    executed_once_keys = set()
+    
+    try:
+        set_status_indicator("● MACRO ACTIVE", CYAN_NEON)
+        while m_data["is_running"] and script_enabled:
+            for idx, act in enumerate(m_data["actions"]):
+                if not m_data["is_running"] or not script_enabled: break
+                
+                loop_type = act.get("loop", "Repeat")
+                if loop_type == "One-Time" and idx in executed_once_keys:
+                    continue
+                    
+                act_type = act.get("type", "Press")
+                
+                start_step_time = time.time()
+                execute_key_action(act["key"], act_type)
+                executed_once_keys.add(idx)
+                
+                if not m_data["is_running"] or not script_enabled: break
+
+                delay_ms = act["delay"]
+                if delay_ms <= 0:
+                    time.sleep(0.001)
+                else:
+                    delay_sec = delay_ms / 1000.0
+                    elapsed = 0
+                    while elapsed < delay_sec and m_data["is_running"] and script_enabled:
+                        time.sleep(0.005)
+                        elapsed += 0.005
+                        
+                actual_spent = time.time() - start_step_time
+                expected_spent = (delay_ms / 1000.0) + 0.015
+                if actual_spent - expected_spent > MAX_LAG_TOLERANCE_SEC:
+                    release_all_active_macros()
+                    set_status_indicator("● LAG DETECTED - STOPPED", DANGER_NEON)
+                    return
+
+            if m_data["mode"] == "Press (1x)":
+                m_data["is_running"] = False
+                break
+    finally:
+        release_all_keys_for_macro(mid)
+        execution_locks[mid] = False
+        if script_enabled and not any(m.get("is_running", False) for m in mappings.values()):
+            set_status_indicator("● SYSTEM READY", GREEN_NEON)
+
+def trigger_mappings(key_name, is_press):
+    if not script_enabled: return
+    for mid, data in list(mappings.items()):
+        if data["trigger"] == key_name:
+            if is_press:
+                if execution_locks.get(mid, False): continue
+                
+                if data["mode"] == "Hold" and not data["is_running"]:
+                    data["is_running"] = True
+                    execution_locks[mid] = True
+                    threading.Thread(target=run_sequence, args=(mid,), daemon=True).start()
+                elif data["mode"] in ["Toggle", "Press (1x)"]:
+                    data["is_running"] = not data["is_running"]
+                    if data["is_running"]:
+                        execution_locks[mid] = True
+                        threading.Thread(target=run_sequence, args=(mid,), daemon=True).start()
+                    else:
+                        release_all_keys_for_macro(mid)
+            else:
+                if data["mode"] == "Hold":
+                    data["is_running"] = False
+                    release_all_keys_for_macro(mid)
+
+def set_recording(rectype, mid):
+    recording_state["type"] = rectype
+    recording_state["id"] = mid
+    refresh_ui()
+
+def process_record(key_name):
+    if recording_state["type"] == "trigger":
+        mappings[recording_state["id"]]["trigger"] = None if key_name == "ESC" else key_name
+    elif recording_state["type"] == "action":
+        if key_name == "ESC":
+            temp_action_keys.pop(recording_state["id"], None)
+        else:
+            temp_action_keys[recording_state["id"]] = key_name
+
+    recording_state["type"] = None
+    recording_state["id"] = None
+    save_data()
+    app.after(0, refresh_ui)
+
+# --- Physical Hardware Key Mapper ---
+def get_key_name(key):
+    if key in SPECIAL_KEYS_MAP:
+        return SPECIAL_KEYS_MAP[key]
+
+    vk = getattr(key, 'vk', None)
+    if vk is not None and vk in VK_TO_KEY:
+        return VK_TO_KEY[vk]
+
+    if hasattr(key, 'char') and key.char:
+        c = key.char.strip()
+        if c in ARABIC_TO_ENGLISH_MAP:
+            return ARABIC_TO_ENGLISH_MAP[c]
+        c_upper = c.upper()
+        if c_upper in KEY_TO_VK:
+            return c_upper
+
+    if hasattr(key, 'name') and key.name:
+        n = key.name.upper()
+        if n in KEY_TO_VK:
+            return n
+
+    return None
+
+def is_master_toggle_pressed(key, key_name):
+    target_str = str(master_toggle_key).upper()
+    if key_name and key_name.upper() == target_str:
+        return True
+    
+    target_vk = KEY_TO_VK.get(target_str)
+    current_vk = getattr(key, 'vk', None)
+    if target_vk and current_vk and target_vk == current_vk:
+        return True
+    return False
+
+# --- Pure Dual-Language Keyboard Listeners ---
+def on_press(key):
+    global script_enabled, master_toggle_key
+    if is_simulating(): return
+    key_name = get_key_name(key)
+
+    # 1. Master Toggle Recording Priority
+    if recording_state["type"] == "master_toggle":
+        if key_name and key_name != "ESC":
+            master_toggle_key = sanitize_master_key(key_name)
+        recording_state["type"] = None
+        recording_state["id"] = None
+        save_data()
+        app.after(0, refresh_ui)
+        return
+
+    # 2. Global Master Pause Toggle Check
+    if is_master_toggle_pressed(key, key_name) and not recording_state["type"]:
+        script_enabled = not script_enabled
+        if not script_enabled:
+            release_all_active_macros()
+            set_status_indicator("● SCRIPT PAUSED (BROWSING MODE)", DANGER_NEON)
+        else:
+            set_status_indicator("● SYSTEM READY", GREEN_NEON)
+        app.after(0, update_guide_master_text)
+        return
+
+    if not script_enabled or not key_name: return
+
+    if recording_state["type"]:
+        process_record(key_name)
+        return
+
+    if _is_own_window_focused_cache: return
+    threading.Thread(target=trigger_mappings, args=(key_name, True), daemon=True).start()
+
+def on_release(key):
+    if not script_enabled: return
+    key_name = get_key_name(key)
+    if not key_name or recording_state["type"]: return
+    
+    threading.Thread(target=trigger_mappings, args=(key_name, False), daemon=True).start()
+
+keyboard.Listener(on_press=on_press, on_release=on_release).start()
+
+# --- Dashboard Layout ---
+sidebar = ctk.CTkFrame(app, width=220, fg_color=COLOR_SIDEBAR, corner_radius=0)
+sidebar.pack(side="left", fill="y")
+sidebar.pack_propagate(False)
+
+ctk.CTkLabel(sidebar, text="Key Script", font=FONT_TITLE, text_color=CYAN_NEON).pack(anchor="w", padx=25, pady=(20, 2))
+ctk.CTkLabel(sidebar, text=f"v{APP_VERSION} | iG_ ::: i67_i9 :::", font=FONT_RIGHTS, text_color=CYAN_NEON).pack(anchor="w", padx=25, pady=(0, 20))
+
+def add_mapping():
+    mid = str(int(time.time() * 1000))
+    mappings[mid] = {"trigger": None, "mode": "Hold", "actions": [], "is_running": False}
+    save_data()
+    refresh_ui()
+
+ctk.CTkButton(sidebar, text="+ Add Smart Action", font=FONT_BTN, fg_color=CYAN_NEON, text_color="#000000",
+              hover_color="#00c8d6", corner_radius=8, height=36, command=add_mapping).pack(fill="x", padx=20, pady=10)
+
+ctk.CTkButton(sidebar, text="💾 Save Config", font=FONT_BTN, fg_color="transparent", border_width=1,
+              border_color=COLOR_BORDER, text_color=COLOR_TEXT_MAIN, height=32, command=export_config).pack(fill="x", padx=20, pady=5)
+
+ctk.CTkButton(sidebar, text="📁 Load Config", font=FONT_BTN, fg_color="transparent", border_width=1,
+              border_color=COLOR_BORDER, text_color=COLOR_TEXT_MAIN, height=32, command=import_config).pack(fill="x", padx=20, pady=5)
+
+main_area = ctk.CTkFrame(app, fg_color="transparent")
+main_area.pack(side="right", fill="both", expand=True, padx=20, pady=15)
+
+top_bar = ctk.CTkFrame(main_area, fg_color="transparent")
+top_bar.pack(fill="x", pady=(0, 15))
+
+ctk.CTkLabel(top_bar, text="Macro Sequences", font=FONT_TITLE, text_color=COLOR_TEXT_MAIN).pack(side="left")
+status_indicator = ctk.CTkLabel(top_bar, text="● SYSTEM READY", font=FONT_SUBTITLE, text_color=GREEN_NEON)
+status_indicator.pack(side="right", padx=10)
+
+# --- In-Page Settings Panel Container ---
+settings_panel = ctk.CTkFrame(main_area, fg_color=COLOR_CARD, border_color=COLOR_BORDER, border_width=1, corner_radius=12)
+settings_panel_visible = False
+
+def toggle_settings():
+    global settings_panel_visible
+    if not settings_panel_visible:
+        settings_panel.pack(fill="x", pady=(0, 15), after=top_bar)
+        settings_panel_visible = True
+    else:
+        settings_panel.pack_forget()
+        settings_panel_visible = False
+
+ctk.CTkButton(sidebar, text="⚙ Settings", font=FONT_BTN, fg_color="transparent", border_width=1,
+              border_color=COLOR_BORDER, text_color=COLOR_TEXT_MAIN, height=32, command=toggle_settings).pack(side="bottom", fill="x", padx=20, pady=20)
+
+# Setup In-Page Settings UI Elements
+st_title_box = ctk.CTkFrame(settings_panel, fg_color="transparent")
+st_title_box.pack(fill="x", padx=15, pady=(10, 5))
+
+ctk.CTkLabel(st_title_box, text="⚙ Application Settings", font=FONT_TITLE, text_color=COLOR_TEXT_MAIN).pack(side="left")
+ctk.CTkButton(st_title_box, text="✕ Close", width=60, height=24, fg_color="transparent", text_color=DANGER_NEON,
+              hover_color="#2b141d", font=FONT_SUBTITLE, command=toggle_settings).pack(side="right")
+
+st_content_box = ctk.CTkFrame(settings_panel, fg_color="transparent")
+st_content_box.pack(fill="x", padx=15, pady=(0, 10))
+
+ctk.CTkLabel(st_content_box, text="Appearance Mode:", font=FONT_NORM, text_color=COLOR_TEXT_MAIN).pack(side="left", padx=(0, 10))
+
+def change_theme(mode):
+    ctk.set_appearance_mode(mode)
+    save_data()
+    refresh_ui()
+
+theme_cb = ctk.CTkComboBox(st_content_box, values=["Dark", "Light"], command=change_theme, width=110,
+                           fg_color=COLOR_BG, text_color=COLOR_TEXT_MAIN,
+                           dropdown_fg_color=COLOR_CARD, dropdown_text_color=COLOR_TEXT_MAIN)
+theme_cb.set(ctk.get_appearance_mode())
+theme_cb.pack(side="left", padx=(0, 30))
+
+ctk.CTkLabel(st_content_box, text="Master Toggle Key:", font=FONT_NORM, text_color=COLOR_TEXT_MAIN).pack(side="left", padx=(0, 10))
+
+btn_master_toggle = ctk.CTkButton(st_content_box, text=f"[ {master_toggle_key} ]", font=FONT_BTN, fg_color=COLOR_BG,
+                                  border_width=1, border_color=COLOR_BORDER, text_color=CYAN_NEON, height=30)
+
+def set_rec_master():
+    recording_state["type"] = "master_toggle"
+    recording_state["id"] = "master"
+    btn_master_toggle.configure(text="[ Press Any Key... ]", text_color=DANGER_NEON)
+
+btn_master_toggle.configure(command=set_rec_master)
+btn_master_toggle.pack(side="left")
+
+# --- Developer Social Links & Suggestions Section ---
+social_frame = ctk.CTkFrame(settings_panel, fg_color=COLOR_BG, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
+social_frame.pack(fill="x", padx=15, pady=(5, 12))
+
+ctk.CTkLabel(social_frame, text="🌐 Developer Socials & Feedback", font=FONT_SUBTITLE, text_color=CYAN_NEON).pack(anchor="w", padx=12, pady=(8, 2))
+ctk.CTkLabel(social_frame, text="For suggestions & inquiries, contact here / للاقتراحات والاستفسارات تواصل هنا:", font=FONT_RIGHTS, text_color=COLOR_TEXT_MUTED).pack(anchor="w", padx=12, pady=(0, 6))
+
+links_box = ctk.CTkFrame(social_frame, fg_color="transparent")
+links_box.pack(fill="x", padx=10, pady=(0, 8))
+
+ctk.CTkButton(
+    links_box, text="🎵 TikTok (@rcayr)", font=FONT_BTN, fg_color="#000000", text_color="#ffffff",
+    hover_color="#1f1f1f", height=32, command=lambda: webbrowser.open("https://www.tiktok.com/@rcayr")
+).pack(side="left", padx=5)
+
+ctk.CTkButton(
+    links_box, text="📸 Instagram (@i67_i9)", font=FONT_BTN, fg_color="#E1306C", text_color="#ffffff",
+    hover_color="#b82355", height=32, command=lambda: webbrowser.open("https://www.instagram.com/i67_i9")
+).pack(side="left", padx=5)
+
+ctk.CTkButton(
+    links_box, text="✈️ Telegram (@BILTB)", font=FONT_BTN, fg_color="#0088cc", text_color="#ffffff",
+    hover_color="#006699", height=32, command=lambda: webbrowser.open("https://t.me/BILTB")
+).pack(side="left", padx=5)
+
+def update_master_btn_ui():
+    if recording_state["type"] == "master_toggle":
+        btn_master_toggle.configure(text="[ Press Any Key... ]", text_color=DANGER_NEON)
+    else:
+        btn_master_toggle.configure(text=f"[ {master_toggle_key} ]", text_color=CYAN_NEON)
+
+# Main Scroll Area
+scroll_area = ctk.CTkScrollableFrame(main_area, fg_color="transparent")
+scroll_area.pack(fill="both", expand=True)
+
+# --- Bottom Frame for Instructions & Guide (Grid System for Auto-Wrapping) ---
+bottom_frame = ctk.CTkFrame(main_area, fg_color=COLOR_CARD, border_color=COLOR_BORDER, border_width=1, corner_radius=10)
+bottom_frame.pack(fill="x", side="bottom", pady=(10, 0))
+
+bottom_frame.grid_columnconfigure(0, weight=0)  # Left Master Info
+bottom_frame.grid_columnconfigure(1, weight=1)  # English Guide
+bottom_frame.grid_columnconfigure(2, weight=1)  # Arabic Guide
+
+left_guide_info = ctk.CTkFrame(bottom_frame, fg_color="transparent")
+left_guide_info.grid(row=0, column=0, padx=15, pady=12, sticky="nw")
+
+ctk.CTkLabel(left_guide_info, text="⚡ Master Toggle Key", font=FONT_NODE, text_color=CYAN_NEON, anchor="w").pack(anchor="w")
+lbl_master_guide = ctk.CTkLabel(left_guide_info, text=f"Press [ {master_toggle_key} ] to Pause/Resume", font=FONT_SUBTITLE, text_color=COLOR_TEXT_MUTED, anchor="w")
+lbl_master_guide.pack(anchor="w", pady=(2, 0))
+
+def update_guide_master_text():
+    lbl_master_guide.configure(text=f"Press [ {master_toggle_key} ] to Pause/Resume")
+
+guide_en = (
+    "📖 Quick Guide:\n"
+    "• Infinite Timing: Set delay to 0 for infinite execution (∞).\n"
+    "• Max Delay Limit: Maximum allowed delay is 10s (10000ms).\n"
+    "• Edit Actions: Click directly on any action button to edit.\n"
+    "• Master Pause: Press Toggle key (default ]) to pause/resume."
+)
+
+guide_ar = (
+    "📌 دليل الاستخدام السريع:\n"
+    "• الوقت اللانهائي: ضع التأخير 0 ليكون الوقت لانهائي (∞).\n"
+    "• الحد الأقصى للتأخير: أقصى وقت مسموح للتأخير هو 10 ثوانٍ (10000ms).\n"
+    "• تعديل السكربت: اضغط مباشرة على الزر المنشأ لتعديل أمره أو وقته.\n"
+    "• مفتاح الإيقاف العام: اضغط زر الإيقاف (الافتراضي ]) للتصفح."
+)
+
+lbl_en = ctk.CTkLabel(
+    bottom_frame,
+    text=guide_en,
+    font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+    text_color=COLOR_TEXT_MUTED,
+    justify="left",
+    anchor="w",
+    wraplength=340
+)
+lbl_en.grid(row=0, column=1, padx=10, pady=10, sticky="nw")
+
+lbl_ar = ctk.CTkLabel(
+    bottom_frame,
+    text=guide_ar,
+    font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+    text_color=COLOR_TEXT_MAIN,
+    justify="right",
+    anchor="e",
+    wraplength=360
+)
+lbl_ar.grid(row=0, column=2, padx=15, pady=10, sticky="ne")
+
+def edit_action_node(mid, idx):
+    act = mappings[mid]["actions"][idx]
+    
+    edit_win = ctk.CTkToplevel(app)
+    edit_win.title("Edit Node")
+    edit_win.geometry("300x260")
+    edit_win.resizable(False, False)
+    edit_win.configure(fg_color=COLOR_BG)
+    edit_win.grab_set()
+
+    ctk.CTkLabel(edit_win, text=f"Edit Action: {act['key']}", font=FONT_TITLE, text_color=COLOR_TEXT_MAIN).pack(pady=(15, 10))
+
+    type_cb = ctk.CTkComboBox(edit_win, values=["Press", "Hold", "Unhold", "Release"], width=150,
+                              fg_color=COLOR_CARD, text_color=COLOR_TEXT_MAIN,
+                              dropdown_fg_color=COLOR_CARD, dropdown_text_color=COLOR_TEXT_MAIN)
+    type_cb.set(act.get("type", "Press"))
+    type_cb.pack(pady=5)
+
+    loop_cb = ctk.CTkComboBox(edit_win, values=["Repeat", "One-Time"], width=150,
+                              fg_color=COLOR_CARD, text_color=COLOR_TEXT_MAIN,
+                              dropdown_fg_color=COLOR_CARD, dropdown_text_color=COLOR_TEXT_MAIN)
+    loop_cb.set(act.get("loop", "Repeat"))
+    loop_cb.pack(pady=5)
+
+    delay_e = ctk.CTkEntry(edit_win, width=150, placeholder_text="Delay (ms)", fg_color=COLOR_CARD, text_color=COLOR_TEXT_MAIN)
+    delay_e.insert(0, str(act["delay"]))
+    delay_e.pack(pady=5)
+
+    def save_node_changes():
+        act["type"] = type_cb.get()
+        act["loop"] = loop_cb.get()
+        act["delay"] = parse_and_limit_delay(delay_e.get())
+        save_data()
+        refresh_ui()
+        edit_win.destroy()
+
+    ctk.CTkButton(edit_win, text="Save Changes", fg_color=CYAN_NEON, text_color="#000", font=FONT_BTN, command=save_node_changes).pack(pady=15)
+
+def remove_action_node(mid, idx):
+    mappings[mid]["actions"].pop(idx)
+    save_data()
+    refresh_ui()
+
+def delete_mapping(mid):
+    del mappings[mid]
+    save_data()
+    refresh_ui()
+
+def update_mode(mid, val):
+    mappings[mid]["mode"] = val
+    save_data()
+
+def add_action_node(mid, act_type_cb, loop_type_cb, delay_entry):
+    key = temp_action_keys.get(mid)
+    if not key:
+        messagebox.showwarning("Warning", "Please select a key first!")
+        return
+    act_type = act_type_cb.get()
+    loop_type = loop_type_cb.get()
+    delay = parse_and_limit_delay(delay_entry.get())
+    
+    mappings[mid]["actions"].append({
+        "key": key, "type": act_type, "loop": loop_type, "delay": delay
+    })
+    temp_action_keys.pop(mid, None)
+    save_data()
+    refresh_ui()
+
+def refresh_ui():
+    update_master_btn_ui()
+    update_guide_master_text()
+    for w in scroll_area.winfo_children(): w.destroy()
+    
+    for mid, data in list(mappings.items()):
+        card = ctk.CTkFrame(scroll_area, fg_color=COLOR_CARD, border_color=COLOR_BORDER, border_width=1, corner_radius=12, height=150)
+        card.pack(fill="x", pady=10, padx=2)
+        card.pack_propagate(False)
+        
+        left_box = ctk.CTkFrame(card, fg_color="transparent", width=160)
+        left_box.pack(side="left", padx=15, fill="y", pady=12)
+        
+        trig_text = f"[ {data['trigger']} ]" if data['trigger'] else "[ NONE ]"
+        is_rec_trig = (recording_state["type"] == "trigger" and recording_state["id"] == mid)
+        if is_rec_trig: trig_text = "[ Press Key... ]"
+        
+        ctk.CTkButton(left_box, text=trig_text, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1, font=FONT_BTN,
+                      text_color=CYAN_NEON if is_rec_trig else (COLOR_TEXT_MAIN if data['trigger'] else COLOR_TEXT_MUTED),
+                      command=lambda m=mid: set_recording("trigger", m)).pack(fill="x", pady=(0, 6))
+        
+        mode_cb = ctk.CTkComboBox(left_box, values=["Hold", "Toggle", "Press (1x)"],
+                                  fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1, font=FONT_NORM, width=130, text_color=COLOR_TEXT_MAIN,
+                                  dropdown_fg_color=COLOR_CARD, dropdown_text_color=COLOR_TEXT_MAIN,
+                                  command=lambda v, m=mid: update_mode(m, v))
+        mode_cb.set(data["mode"])
+        mode_cb.pack(fill="x", pady=2)
+        
+        ctk.CTkButton(left_box, text="Remove", fg_color="transparent", text_color=DANGER_NEON,
+                      hover_color="#2b141d", font=FONT_SUBTITLE, height=22,
+                      command=lambda m=mid: delete_mapping(m)).pack(pady=(6, 0))
+
+        right_box = ctk.CTkScrollableFrame(card, fg_color="transparent", orientation="horizontal", height=120)
+        right_box.pack(side="left", fill="both", expand=True, padx=10, pady=8)
+        
+        for idx, act in enumerate(data["actions"]):
+            node = ctk.CTkFrame(right_box, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1, corner_radius=8)
+            node.pack(side="left", padx=6, pady=2)
+            
+            act_type = act.get("type", "Press")
+            loop_type = act.get("loop", "Repeat")
+            
+            btn_node = ctk.CTkButton(node, text=f"{act['key']}", font=FONT_NODE, fg_color="transparent", height=24, text_color=COLOR_TEXT_MAIN,
+                                     command=lambda m=mid, i=idx: edit_action_node(m, i))
+            btn_node.pack(padx=10, pady=(2,0))
+            
+            ctk.CTkLabel(node, text=f"[{act_type}]", text_color=GREEN_NEON if act_type=="Hold" else COLOR_TEXT_MUTED, font=FONT_SUBTITLE).pack(padx=8)
+            ctk.CTkLabel(node, text=f"{loop_type}", text_color=COLOR_TEXT_MUTED, font=FONT_SUBTITLE).pack(padx=8)
+            
+            delay_text = format_delay_text(act['delay'])
+            ctk.CTkLabel(node, text=delay_text, text_color=CYAN_NEON, font=FONT_SUBTITLE).pack(padx=8)
+            
+            ctk.CTkButton(node, text="×", width=18, height=18, fg_color="transparent", text_color=COLOR_TEXT_MUTED,
+                          hover_color=DANGER_NEON, command=lambda m=mid, i=idx: remove_action_node(m, i)).pack(pady=(2,4))
+
+        add_box = ctk.CTkFrame(right_box, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1, corner_radius=8)
+        add_box.pack(side="left", padx=10, pady=2)
+        
+        act_text = temp_action_keys.get(mid, "[ Key ]")
+        is_rec_act = (recording_state["type"] == "action" and recording_state["id"] == mid)
+        if is_rec_act: act_text = "..."
+        
+        ctk.CTkButton(add_box, text=act_text, width=55, height=28, fg_color=COLOR_CARD, font=FONT_BTN, text_color=COLOR_TEXT_MAIN,
+                      command=lambda m=mid: set_recording("action", m)).pack(side="left", padx=4, pady=6)
+        
+        act_type_cb = ctk.CTkComboBox(add_box, values=["Press", "Hold", "Unhold", "Release"], width=75, height=28,
+                                       fg_color=COLOR_CARD, border_width=0, font=FONT_SUBTITLE, text_color=COLOR_TEXT_MAIN,
+                                       dropdown_fg_color=COLOR_CARD, dropdown_text_color=COLOR_TEXT_MAIN)
+        act_type_cb.set("Press")
+        act_type_cb.pack(side="left", padx=2, pady=6)
+
+        loop_type_cb = ctk.CTkComboBox(add_box, values=["Repeat", "One-Time"], width=80, height=28,
+                                       fg_color=COLOR_CARD, border_width=0, font=FONT_SUBTITLE, text_color=COLOR_TEXT_MAIN,
+                                       dropdown_fg_color=COLOR_CARD, dropdown_text_color=COLOR_TEXT_MAIN)
+        loop_type_cb.set("Repeat")
+        loop_type_cb.pack(side="left", padx=2, pady=6)
+
+        delay_e = ctk.CTkEntry(add_box, width=45, height=28, placeholder_text="ms", fg_color=COLOR_CARD, border_width=0, text_color=COLOR_TEXT_MAIN)
+        delay_e.insert(0, "100")
+        delay_e.pack(side="left", padx=4, pady=6)
+        
+        delay_e.bind("<Return>", lambda event, m=mid, t=act_type_cb, l=loop_type_cb, e=delay_e: add_action_node(m, t, l, e))
+        
+        ctk.CTkButton(add_box, text="+", width=28, height=28, fg_color=CYAN_NEON, text_color="#000000",
+                      hover_color="#00c8d6", font=FONT_BTN,
+                      command=lambda m=mid, t=act_type_cb, l=loop_type_cb, e=delay_e: add_action_node(m, t, l, e)).pack(side="left", padx=4, pady=6)
+
+refresh_ui()
+app.mainloop()
